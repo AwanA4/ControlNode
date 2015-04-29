@@ -10,6 +10,7 @@ require 'mongo'
 
 configure{ set :server, :puma}
 
+$process_queue = Queue.new
 $process_hash = Hash.new
 $Process = Struct.new(:user, :cpu, :ram, :repo, :container, :ip_addr)
 $Template = LXC::Container.new('ComputeNode')
@@ -66,6 +67,14 @@ before do
 	@req_data = JSON.parse request.body.read
 end
 
+Thread.new do
+	while true do
+		info = $process_queue.pop
+		$process_hash.store(info[:container], info)
+		$thread_list << Thread.new{watch_process(info)}
+	end
+end
+
 post '/container' do
 	#Sent data => user, cpu, ram, repo
 	unless @req_data['user'].nil? or @req_data['ram'].nil? or @req_data['repo'].nil?
@@ -78,9 +87,10 @@ post '/container' do
 		#while new_container.ip_addresses[0].nil?
 		#end
 		new_process = $Process.new(@req_data['user'], @req_data['cpu'], @req_data['ram'], @req_data['repo'], container_name, new_container.ip_addresses)
-		$process_hash.store(container_name, new_process)
+		#$process_hash.store(container_name, new_process)
+		$process_queue.push(new_process)
 		#Start watch_process thread
-		$thread_list << Thread.new{watch_process(new_process)}
+		#$thread_list << Thread.new{watch_process(new_process)}
 		redirect ('/container/' + container_name + '/info')
 	end
 end
