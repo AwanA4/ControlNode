@@ -6,12 +6,14 @@ require 'puma'
 require 'lxc'
 require 'net/http'
 require 'thread'
+require 'mongo'
 
 configure{ set :server, :puma}
 
 $process_hash = Hash.new
 $Process = Struct.new(:user, :cpu, :ram, :repo, :container, :ip_addr)
 $Template = LXC::Container.new('ComputeNode')
+$thread_list = Array.new
 
 def randomChar(length)
 	o = [('a'..'z'), ('A'..'Z')].map{|i| i.to_a}.flatten
@@ -21,7 +23,11 @@ end
 
 def watch_process(info)
 	process = LXC::Container.new(info[:container])
-	ip_addr = info.ip_addr
+	while process.ip_addresses[0].nil?
+		sleep(0.5)
+	end
+	info[:ip_addr] = process.ip_addresses
+	ip_addr = info.ip_addr[0]
 	http = Net::HTTP.new(ip_addr, '80')
 	check_alive = Net::HTTP::Get.new('/status')
 	usage_request = Net::HTTP::Get.new('/usage')
@@ -41,15 +47,15 @@ def watch_process(info)
 		#Sleep for fixed time
 		sleep(20)
 	end until parsed_response['finished']
-	output_request = = Net::HTTP::Get.new('/all_output')
+	output_request = Net::HTTP::Get.new('/all_output')
 	response = http.request(output_request)
-	parsed_response = JSON.parse(response.body.read)
+	parsed_response = JSON.parse(response.body)
 	#Put output to database
 
 	#
 	#Remove process from hash
 	$process_hash.delete(info[:container])
-
+	$thread_list.delete(Thread.current)
 	process.stop
 	process.destroy
 end
@@ -67,12 +73,14 @@ post '/container' do
 		new_container = $Template.clone(container_name, {:flags => LXC::LXC_CLONE_SNAPSHOT})
 
 		#start the process
-		new_container.set_cgroup_item('memory.limit_in_bytes', @req_data['ram'].to_s)
+		#new_container.set_cgroup_item('memory.limit_in_bytes', @req_data['ram'].to_s)
 		new_container.start({:daemonize => true})
-		new_process = $Process.new(@req_data['user'], @req_data['cpu'], @req_data['ram'], @req_data['repo'], container_name, new_container.ip_address)
+		#while new_container.ip_addresses[0].nil?
+		#end
+		new_process = $Process.new(@req_data['user'], @req_data['cpu'], @req_data['ram'], @req_data['repo'], container_name, new_container.ip_addresses)
 		$process_hash.store(container_name, new_process)
 		#Start watch_process thread
-		Thread.new{watch_process(new_process)}
+		$thread_list << Thread.new{watch_process(new_process)}
 		redirect ('/container/' + container_name + '/info')
 	end
 end
@@ -86,7 +94,7 @@ get '/container/:id/output' do
 		response = http.request(req)
 
 		content_type :json
-		response.body.read
+		response.body
 	end
 end
 
@@ -94,7 +102,7 @@ post '/container/:id/input' do
 	input = @req_data['stdin']
 	if not $process_hash[params[:id]].nil?
 		info = $process_hash[params[:id]]
-		http = Net::HTTP.new(info[:ip_addr], '80')
+		http = Net::HTTP.new(info[:ip_addr][0], '80')
 		req = Net::HTTP::Post.new('/input')
 		req.body = {'stdin' => input}.to_json
 		http.request(req)
