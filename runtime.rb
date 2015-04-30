@@ -7,6 +7,8 @@ require 'lxc'
 require 'net/http'
 require 'thread'
 require 'mongo'
+require 'socket'
+require 'timeout'
 
 configure{ set :server, :puma}
 configure{ :development}
@@ -27,11 +29,13 @@ end
 
 def watch_process(info)
 	process = LXC::Container.new(info[:container])
-	while process.ip_addresses[0].nil?
-		sleep(0.5)
-	end
+	sleep(1) while process.ip_addresses[0].nil?
+
 	info[:ip_addr] = process.ip_addresses
 	ip_addr = info.ip_addr[0]
+
+	next until is_port_open? ip_addr 80
+
 	http = Net::HTTP.new(ip_addr, '80')
 	check_alive = Net::HTTP::Get.new('/status')
 	usage_request = Net::HTTP::Get.new('/usage')
@@ -70,6 +74,22 @@ def watch_process(info)
 	process.destroy
 end
 
+def is_port_open?(ip, port)
+	begin
+		Timeout::timeout(1) do
+			begin
+				s = TCPSocket.new(ip, port)
+				s.close
+				return true
+			rescue  Errno::ECONNREFUSED, Errno::EHOSTUNREACH
+				return false
+			end
+		end
+	rescue Timeout::Error
+	end
+	return false
+end
+
 before do
 	next unless request.post?
 	request.body.rewind
@@ -105,7 +125,7 @@ post '/container' do
 end
 
 get '/container/:id/output' do
-	unless $process_hash[params['id']].nil?
+	unless $process_hash[params[:id]].nil?
 		info = $process_hash[params[:id]]
 		ip_addr = info[:ip_addr][0]
 		http = Net::HTTP.new(ip_addr, '80')
