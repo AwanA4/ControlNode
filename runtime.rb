@@ -9,10 +9,13 @@ require 'thread'
 require 'mongo'
 
 configure{ set :server, :puma}
+configure{ :development}
+configure{ enable :logging, :dump_errors, :raise_errors}
 
 $process_queue = Queue.new
 $process_hash = Hash.new
 $Process = Struct.new(:user, :cpu, :ram, :repo, :container, :ip_addr)
+$all_output = ''
 $Template = LXC::Container.new('ComputeNode')
 $thread_list = Array.new
 
@@ -33,11 +36,16 @@ def watch_process(info)
 	check_alive = Net::HTTP::Get.new('/status')
 	usage_request = Net::HTTP::Get.new('/usage')
 
+	process = LXC::Container.new(info[:container])
+	sleep(1) while process.ip_addresses[0].nil?
 	repo_post = Net::HTTP::Post.new('/repo')
-	repo_post.body = {'repo' => info[:repo]}.to_json
-	http.request(repo_post)
+	repo_post.body = {'repo' => info['repo'].to_s}.to_json
+	puts info[:container] + " send repo " + info[:repo]
+	response = http.request(repo_post)
 	start_get = Net::HTTP::Get.new('/start')
-	http.request(start_get)
+	response = http.request(start_get)
+	puts info[:container] + " send start"
+	$started = true
 	begin
 		response = http.request(check_alive)
 		parsed_response = JSON.parse(response.body.read)
@@ -50,7 +58,8 @@ def watch_process(info)
 	end until parsed_response['finished']
 	output_request = Net::HTTP::Get.new('/all_output')
 	response = http.request(output_request)
-	parsed_response = JSON.parse(response.body)
+	parsed_response = JSON.parse(response.body.read)
+	$all_output = parsed_response
 	#Put output to database
 
 	#
@@ -70,6 +79,7 @@ end
 Thread.new do
 	while true do
 		info = $process_queue.pop
+		puts "Container " + info[:container] + " started"
 		$process_hash.store(info[:container], info)
 		$thread_list << Thread.new{watch_process(info)}
 	end
@@ -83,34 +93,36 @@ post '/container' do
 
 		#start the process
 		#new_container.set_cgroup_item('memory.limit_in_bytes', @req_data['ram'].to_s)
+		new_container.save_config
 		new_container.start({:daemonize => true})
-		#while new_container.ip_addresses[0].nil?
-		#end
 		new_process = $Process.new(@req_data['user'], @req_data['cpu'], @req_data['ram'], @req_data['repo'], container_name, new_container.ip_addresses)
 		#$process_hash.store(container_name, new_process)
-		$process_queue.push(new_process)
 		#Start watch_process thread
+		$process_queue.push(new_process)
 		#$thread_list << Thread.new{watch_process(new_process)}
 		redirect ('/container/' + container_name + '/info')
 	end
 end
 
 get '/container/:id/output' do
-	if not $process_hash[params[:id]].nil?
+	unless $process_hash[params['id']].nil?
 		info = $process_hash[params[:id]]
-		ip_addr = info[:ip_addr]
+		ip_addr = info[:ip_addr][0]
 		http = Net::HTTP.new(ip_addr, '80')
 		req = Net::HTTP::Get.new('/output')
 		response = http.request(req)
 
 		content_type :json
-		response.body
+		response.body unless response.nil?
+	else
+		content_type :json
+		$all_output.to_json unless $all_output.nil?
 	end
 end
 
 post '/container/:id/input' do
 	input = @req_data['stdin']
-	if not $process_hash[params[:id]].nil?
+	unless $process_hash[params[:id]].nil?
 		info = $process_hash[params[:id]]
 		http = Net::HTTP.new(info[:ip_addr][0], '80')
 		req = Net::HTTP::Post.new('/input')
@@ -120,7 +132,7 @@ post '/container/:id/input' do
 end
 
 get '/container/:id/info' do
-	if not $process_hash[params[:id]].nil?
+	unless $process_hash[params[:id]].nil?
 		info = $process_hash[params[:id]]
 
 		content_type :json
@@ -128,7 +140,9 @@ get '/container/:id/info' do
    'user' => info[:user],
 		'repo' => info[:repo],
 		'cpu' => info[:cpu],
-		'ram' => info[:ram]
+		'ram' => info[:ram],
+		'ip' => info[:ip_addr][0].to_s,
+		'started' => $started
 		}.to_json
 	end
 end
