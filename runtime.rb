@@ -15,7 +15,7 @@ configure{ :development}
 configure{ enable :logging, :dump_errors, :raise_errors}
 
 $process_hash = Hash.new
-$Process = Struct.new(:user, :cpu, :ram, :repo, :container, :ip_addr)
+$Process = Struct.new(:user, :cpu, :ram, :repo, :container, :ip_addr, :started)
 $all_output = ''
 $Template = LXC::Container.new('ComputeNode')
 $thread_list = Array.new
@@ -40,7 +40,6 @@ def watch_process(info)
 	http.read_timeout = 10
 	check_alive = Net::HTTP::Get.new('/status')
 	usage_request = Net::HTTP::Get.new('/usage')
-	repo_get = Net::HTTP::Get.new('/repo')
 	theRepo = Hash.new
 	begin
 		repo_post = Net::HTTP::Post.new('/repo')
@@ -48,7 +47,7 @@ def watch_process(info)
 		puts info[:container] + " send repo " + info[:repo]
 		response = http.request(repo_post)
 	rescue Timeout::Error => e
-		puts 'Send repo #{e}'
+		puts "Send repo #{e}"
 		retry
 	else
 		puts info[:container] + ' response ' + response.body
@@ -61,14 +60,18 @@ def watch_process(info)
 		start_get = Net::HTTP::Get.new('/start')
 		response = http.request(start_get)
 	rescue Timeout::Error => e
-		puts 'Error start #{e}'
+		puts "Error start #{e}"
 		retry
 	else
 		puts info[:container] + " send start"
-		$started = true	
 	end
 
 	begin
+		#Get usage
+		response = http.request(usage_request)
+		parsed_response = JSON.parse(response.body)
+		#Save to database
+		#
 		puts 'Checking if process in ' + info[:container] + ' is still alive'
 		response = http.request(check_alive)
 		parsed_response = JSON.parse(response.body)
@@ -76,10 +79,6 @@ def watch_process(info)
 		if parsed_response[:finished]
 			puts 'Process ' + info[:container] + 'finished'
 		end
-		#Get usage
-
-		#Save to database
-		#
 	rescue Timeout::Error => e
 		puts 'Check alive timeout'
 		next
@@ -101,20 +100,20 @@ def watch_process(info)
 	#Put output to database
 
 	#
+rescue => e
+	p e
+ensure
+	#Remove process from hash
+	$process_hash.delete(info[:container])
+	$thread_list.delete(Thread.current)
+	begin
+		puts 'Stopping container ' + info[:container]
+		process.stop
+		puts 'Destroying ' + info[:container]
+		process.destroy
 	rescue => e
 		p e
-	ensure
-		#Remove process from hash
-		$process_hash.delete(info[:container])
-		$thread_list.delete(Thread.current)
-		begin
-			puts 'Stopping container ' + info[:container]
-			process.stop
-			puts 'Destroying ' + info[:container]
-			process.destroy
-		rescue => e
-			p e
-		end
+	end
 end
 
 def is_port_open?(ip, port)
@@ -149,12 +148,27 @@ post '/container' do
 		#new_container.set_cgroup_item('memory.limit_in_bytes', @req_data['ram'].to_s)
 		new_container.save_config
 		new_container.start({:daemonize => true})
-		new_process = $Process.new(@req_data['user'], @req_data['cpu'], @req_data['ram'], @req_data['repo'], container_name, new_container.ip_addresses)
-		#$process_hash.store(container_name, new_process)
+		new_process = $Process.new(
+			@req_data['user'],
+			@req_data['cpu'],
+			@req_data['ram'],
+			@req_data['repo'],
+			container_name,
+			new_container.ip_addresses,
+			false
+		)
+		$process_hash.store(container_name, new_process)
 		#Start watch_process thread
-		#$process_queue.push(new_process)
 		$thread_list << Thread.new{watch_process(new_process)}
-		redirect ('/container/' + container_name + '/info')
+
+		content_type :json
+		{
+			"user" => new_process[:user],
+			"cpu" => new_process[:cpu],
+			"ram" => new_process[:ram],
+			"repo" => new_process[:repo],
+			"id" => new_process[:container]
+		}.to_json
 	end
 end
 
@@ -169,8 +183,10 @@ get '/container/:id/output' do
 		content_type :json
 		response.body unless response.nil?
 	else
+		#placeholder
 		content_type :json
 		$all_output.to_json unless $all_output.nil?
+		#Read database and redirect request
 	end
 end
 
@@ -182,6 +198,8 @@ post '/container/:id/input' do
 		req = Net::HTTP::Post.new('/input')
 		req.body = {'stdin' => input}.to_json
 		http.request(req)
+	else
+		#Read database and redirect the request
 	end
 end
 
@@ -190,13 +208,40 @@ get '/container/:id/info' do
 		info = $process_hash[params[:id]]
 
 		content_type :json
-		{'id' => info[:container],
-   'user' => info[:user],
-		'repo' => info[:repo],
-		'cpu' => info[:cpu],
-		'ram' => info[:ram],
-		'ip' => info[:ip_addr][0].to_s,
-		'started' => $started
+		{
+			'id' => info[:container],
+			'user' => info[:user],
+			'repo' => info[:repo],
+			'cpu' => info[:cpu],
+			'ram' => info[:ram],
+			'ip' => info[:ip_addr][0].to_s,
+			'started' => $started
 		}.to_json
+	else
+		#Check database and redirect the request
+	end
+end
+
+post '/container/:id/stop' do
+	unless $process_hash[params[:id]].nil?
+		if @req_data[:stop]
+			info = $process_hash[params[:id]]
+			http = Net::HTTP.new(info[:ip_addr], '80')
+			stop_req = Net::HTTP::Post.new('/stop')
+			stop_req.body = {"stop" => true}.to_json
+			begin
+				response = http.request(stop_req)
+				parsed = JSON.parse(response.body)
+				if parsed[:stopped]
+					content_type :json
+					{"stopped" => true}.to_json
+				end
+			rescue Timeout::Error => e
+				content_type :json
+				{"stopped" => false}.to_json
+			end
+		end
+	else
+		#Read database and redirect request
 	end
 end
