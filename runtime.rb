@@ -13,6 +13,10 @@ require 'timeout'
 configure{ set :server, :puma}
 configure{ :development}
 configure{ enable :logging, :dump_errors, :raise_errors}
+configure do
+	conn = Mongo::Client.new(['10.151.34.168:27017'], :database => 'CodeLoud')
+	set :mongo_db, conn
+end
 
 $process_hash = Hash.new
 $Process = Struct.new(:user, :cpu, :ram, :repo, :container, :ip_addr, :started)
@@ -26,8 +30,13 @@ def randomChar(length)
 	return string
 end
 
+def to_bson_id(val)
+	return BSON::ObjectId.from_string(val)
+end
+
 def watch_process(info)
 	process = LXC::Container.new(info[:container])
+	object_id = to_bson_id(info[:container])
 	sleep(1) while process.ip_addresses[0].nil?
 
 	puts info[:container] + ' get IP address'
@@ -51,8 +60,6 @@ def watch_process(info)
 		retry
 	else
 		puts info[:container] + ' response ' + response.body
-		#theRepo = JSON.parse(response.body)
-		#puts theRepo[:repo]
 	end
 
 	begin
@@ -64,14 +71,26 @@ def watch_process(info)
 		retry
 	else
 		puts info[:container] + " send start"
+		start_time = Time.now
 	end
 
 	begin
 		#Get usage
 		response = http.request(usage_request)
 		parsed_response = JSON.parse(response.body)
+		elapsed = Time.now - start_time
 		#Save to database
-		#
+		result = settings.mongo_db[:Node].find(:_id => object_id).
+			find_one_and_update('$push' =>
+								{
+									:usages =>
+									{
+										time: elapsed.to_i,
+										cpu: parsed_response[:cpu],
+										ram: parsed_response[:ram]
+									}
+								})
+
 		puts 'Checking if process in ' + info[:container] + ' is still alive'
 		response = http.request(check_alive)
 		parsed_response = JSON.parse(response.body)
@@ -92,6 +111,12 @@ def watch_process(info)
 		output_request = Net::HTTP::Get.new('/all_output')
 		response = http.request(output_request)
 		parsed_response = JSON.parse(response.body)
+		result = settings.mongo_db[:Node].find(:_id => object_id).
+			find_one_and_update('$set' =>
+								{
+									stdout: parsed_response[:stdout],
+									stderr: parsed_response[:stderr],
+								})
 		$all_output = parsed_response
 	rescue Timeout::Error => e
 		puts 'Error retrieving all output ' + info[:container]
@@ -106,6 +131,11 @@ ensure
 	#Remove process from hash
 	$process_hash.delete(info[:container])
 	$thread_list.delete(Thread.current)
+	result = settings.mongo_db[:Node].find(:_id => object_id).
+		find_one_and_update('$set' =>
+							{
+								status: true
+							})
 	begin
 		puts 'Stopping container ' + info[:container]
 		process.stop
@@ -141,7 +171,18 @@ end
 post '/container' do
 	#Sent data => user, cpu, ram, repo
 	unless @req_data['user'].nil? or @req_data['ram'].nil? or @req_data['repo'].nil?
-		container_name = @req_data['user'] + '-' + randomChar(10)
+		result = settings.mongo_db[:Node].insert_one({
+			cpu: @req_data['cpu'],
+			ram: @req_data['ram'],
+			status: false,
+			stdout: '',
+			stderr: '',
+			url: @req_data['repo'],
+			usages: [],
+			stdin: '',
+			server: Socket.ip_address_list[1].ip_address
+		})
+		container_name = result.inserted_id.to_s
 		new_container = $Template.clone(container_name, {:flags => LXC::LXC_CLONE_SNAPSHOT})
 
 		#start the process
@@ -160,6 +201,11 @@ post '/container' do
 		$process_hash.store(container_name, new_process)
 		#Start watch_process thread
 		$thread_list << Thread.new{watch_process(new_process)}
+		result = settings.mongo_db[:User].find(:_id => to_bson_id(@req_data['user'])).
+			find_one_and_update('$push' =>
+								{
+									:nodes => to_bson_id(container_name)
+								})
 
 		content_type :json
 		{
@@ -183,10 +229,20 @@ get '/container/:id/output' do
 		content_type :json
 		response.body unless response.nil?
 	else
-		#placeholder
-		content_type :json
-		$all_output.to_json unless $all_output.nil?
 		#Read database and redirect request
+		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
+		if result and not result[:status]
+				http = Net::HTTP.new(result[:server], '80')
+				req = Net::HTTP::Get.new("/container/#{params[:id]}/output")
+			begin
+				response = http.request(req)
+			rescue Timeout::Error => e
+				p e
+			else
+				content_type :json
+				response.body unless response.nil?
+			end
+		end
 	end
 end
 
@@ -200,9 +256,21 @@ post '/container/:id/input' do
 		http.request(req)
 	else
 		#Read database and redirect the request
+		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
+		if result and not result[:status]
+				http = Net::HTTP.new(result[:server], '80')
+				req = Net::HTTP::Post.new("/container/#{params[:id]}/input")
+				req.body = {'stdin' => input}.to_json
+			begin
+				http.request(req)
+			rescue Timeout::Error => e
+				p e
+			end
+		end
 	end
 end
 
+#dummy method for debugging purpose
 get '/container/:id/info' do
 	unless $process_hash[params[:id]].nil?
 		info = $process_hash[params[:id]]
@@ -219,6 +287,19 @@ get '/container/:id/info' do
 		}.to_json
 	else
 		#Check database and redirect the request
+		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
+		if result and not result[:status]
+				http = Net::HTTP.new(result[:server], '80')
+				req = Net::HTTP::Get.new("/container/#{params[:id]}/info")
+			begin
+				response = http.request(req)
+			rescue Timeout::Error => e
+				p e
+			else
+				content_type :json
+				response.body
+			end
+		end
 	end
 end
 
@@ -243,5 +324,21 @@ post '/container/:id/stop' do
 		end
 	else
 		#Read database and redirect request
-	end
+		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
+		if result and @req_data[:stop] and not result[:status]
+			http = Net::HTTP.new(result[:server], '80')
+			stop_req = Net::HTTP::Post.new("/container/#{params[:id]}/stop")
+			stop_req.body = {'stop' => true}.to_json
+			begin
+				response = http.request(stop_req)
+				parsed = JSON.parse(response.body)
+				if parsed[:stopped]
+					content_type :json
+					{"stopped" => true}.to_json
+				end
+			rescue Timeout::Error => e
+				content_type :json
+				{"stopped" => false}.to_json
+			end
+		end
 end
