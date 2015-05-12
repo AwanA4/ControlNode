@@ -246,6 +246,17 @@ get '/container/:id/output' do
 	end
 end
 
+get '/container/:id/complete_output' do
+	result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
+	if result and result[:status]
+		content_type :json
+		{
+			'stdout' => result[:stdout],
+			'stderr' => result[:stderr]
+		}.to_json
+	end
+end
+
 post '/container/:id/input' do
 	input = @req_data['stdin']
 	unless $process_hash[params[:id]].nil?
@@ -272,35 +283,31 @@ end
 
 #dummy method for debugging purpose
 get '/container/:id/info' do
-	unless $process_hash[params[:id]].nil?
-		info = $process_hash[params[:id]]
+	#unless $process_hash[params[:id]].nil?
+		#info = $process_hash[params[:id]]
 
-		content_type :json
-		{
-			'id' => info[:container],
-			'user' => info[:user],
-			'repo' => info[:repo],
-			'cpu' => info[:cpu],
-			'ram' => info[:ram],
-			'ip' => info[:ip_addr][0].to_s,
-			'started' => $started
-		}.to_json
-	else
+		#content_type :json
+		#{
+			#'id' => info[:container],
+			#'repo' => info[:repo],
+			#'cpu' => info[:cpu],
+			#'ram' => info[:ram],
+			#'finished' => false
+		#}.to_json
+	#else
 		#Check database and redirect the request
 		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
-		if result and not result[:status]
-				http = Net::HTTP.new(result[:server], '80')
-				req = Net::HTTP::Get.new("/container/#{params[:id]}/info")
-			begin
-				response = http.request(req)
-			rescue Timeout::Error => e
-				p e
-			else
-				content_type :json
-				response.body
-			end
+		if result
+			content_type :json
+			{
+				'id' => result[:_id],
+				'repo' => result[:url],
+				'cpu' => result[:cpu],
+				'ram' => result[:ram],
+				'finished' => result[:status]
+			}.to_json
 		end
-	end
+	#end
 end
 
 post '/container/:id/stop' do
@@ -341,4 +348,5 @@ post '/container/:id/stop' do
 				{"stopped" => false}.to_json
 			end
 		end
+	end
 end
