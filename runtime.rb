@@ -15,6 +15,7 @@ configure{ :development}
 configure{ enable :logging, :dump_errors, :raise_errors}
 configure do
 	conn = Mongo::Client.new(['10.151.34.168:27017'], :database => 'CodeLoud')
+	Mongo::Logger.logger.level = Logger::WARN
 	set :mongo_db, conn
 end
 
@@ -86,8 +87,8 @@ def watch_process(info)
 									:usages =>
 									{
 										time: elapsed.to_i,
-										cpu: parsed_response[:cpu],
-										ram: parsed_response[:ram]
+										cpu: parsed_response['cpu'].to_f,
+										ram: parsed_response['ram'].to_f
 									}
 								})
 
@@ -114,8 +115,8 @@ def watch_process(info)
 		result = settings.mongo_db[:Node].find(:_id => object_id).
 			find_one_and_update('$set' =>
 								{
-									stdout: parsed_response[:stdout],
-									stderr: parsed_response[:stderr],
+									stdout: parsed_response['stdout'].to_s,
+									stderr: parsed_response['stderr'].to_s
 								})
 		$all_output = parsed_response
 	rescue Timeout::Error => e
