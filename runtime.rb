@@ -14,7 +14,7 @@ configure{ set :server, :puma}
 configure{ :development}
 configure{ enable :logging, :dump_errors, :raise_errors}
 configure do
-	conn = Mongo::Client.new(['10.151.34.168:27017'], :database => 'CodeLoud')
+	conn = Mongo::Client.new(['192.168.60.4:27017'], :database => 'CodeLoud')
 	Mongo::Logger.logger.level = Logger::WARN
 	set :mongo_db, conn
 end
@@ -104,7 +104,7 @@ def watch_process(info)
 		next
 	else
 		#Sleep for fixed time
-		sleep(20)
+		sleep(5)
 	end until parsed_response['finished']
 
 	begin
@@ -231,9 +231,9 @@ get '/container/:id/output' do
 		response.body unless response.nil?
 	else
 		#Read database and redirect request
-		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
-		if result and not result[:status]
-				http = Net::HTTP.new(result[:server], '80')
+		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id])).first
+		if result and not result['status']
+				http = Net::HTTP.new(result['server'], '80')
 				req = Net::HTTP::Get.new("/container/#{params[:id]}/output")
 			begin
 				response = http.request(req)
@@ -248,7 +248,7 @@ get '/container/:id/output' do
 end
 
 get '/container/:id/complete_output' do
-	result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
+	result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id])).first
 	if result and result[:status]
 		content_type :json
 		{
@@ -268,7 +268,7 @@ post '/container/:id/input' do
 		http.request(req)
 	else
 		#Read database and redirect the request
-		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
+		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id])).first
 		if result and not result[:status]
 				http = Net::HTTP.new(result[:server], '80')
 				req = Net::HTTP::Post.new("/container/#{params[:id]}/input")
@@ -297,7 +297,7 @@ get '/container/:id/info' do
 		#}.to_json
 	#else
 		#Check database and redirect the request
-		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
+		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id])).first
 		if result
 			content_type :json
 			{
@@ -332,7 +332,7 @@ post '/container/:id/stop' do
 		end
 	else
 		#Read database and redirect request
-		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id]))
+		result = settings.mongo_db[:Node].find(:_id => to_bson_id(params[:id])).first
 		if result and @req_data[:stop] and not result[:status]
 			http = Net::HTTP.new(result[:server], '80')
 			stop_req = Net::HTTP::Post.new("/container/#{params[:id]}/stop")
